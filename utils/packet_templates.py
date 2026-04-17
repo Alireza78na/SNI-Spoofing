@@ -1,8 +1,9 @@
 import struct
+import random
 
 
 class ClientHelloMaker:
-    tls_ch_template_str = "1603010200010001fc030341d5b549d9cd1adfa7296c8418d157dc7b624c842824ff493b9375bb48d34f2b20bf018bcc90a7c89a230094815ad0c15b736e38c01209d72d282cb5e2105328150024130213031301c02cc030c02bc02fcca9cca8c024c028c023c027009f009e006b006700ff0100018f0000000b00090000066d63692e6972000b000403000102000a00160014001d0017001e0019001801000101010201030104002300000010000e000c02683208687474702f312e310016000000170000000d002a0028040305030603080708080809080a080b080408050806040105010601030303010302040205020602002b00050403040303002d00020101003300260024001d0020435bacc4d05f9d41fef44ab3ad55616c36e0613473e2338770efdaa98693d217001500d5000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    tls_ch_template_str = "1603010200010001fc030341d5b549d9cd1adfa7296c8418d157dc7b624c842824ff493b9375bb48d34f2b20bf018bcc90a7c89a230094815ad0c15b736e38c01209d72d282cb5e2105328150024130213031301c02cc030c02bc02fcca9cca8c024c028c023c027009f009e006b006700ff0100018f0000000b00090000066d63692e6972000b000403000102000a00160014001d0017001e0019001801000101010201030104002300000010000e000c02683208687474702f312e310016000000170000000d002a0028040305030603080708080809080a080b080408050806040105010601030303010302040205020602002b00050403040303002d00020101003300260024001d0020435bacc4d05f9d41fef44ab3ad55616c36e0613473e2338770efdaa98693d217001500d50000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
     tls_ch_template = bytes.fromhex(tls_ch_template_str)
     template_sni = "mci.ir".encode()
     static1 = tls_ch_template[:11]
@@ -20,19 +21,32 @@ class ClientHelloMaker:
         server_name_ext = struct.pack("!H", len(target_sni) + 5) + struct.pack("!H",
                                                                                len(target_sni) + 3) + b"\x00" + struct.pack(
             "!H", len(target_sni)) + target_sni
-        padding_ext = struct.pack("!H", 219 - len(target_sni)) + (b"\x00" * (219 - len(target_sni)))
-        return cls.static1 + rnd + cls.static2 + sess_id + cls.static3 + server_name_ext + cls.static4 + key_share + cls.static5 + padding_ext
-        # rnd-> [11:43)  sess_id-> [44:76) key_share-> [262+len(target_sni):294+len(target_sni))
+        
+        # تولید طول تصادفی برای پدینگ جهت داینامیک شدن سایز بسته
+        random_pad_len = random.randint(100, 300)
+        padding_ext = struct.pack("!H", random_pad_len) + (b"\x00" * random_pad_len)
+        
+        base_packet = cls.static1 + rnd + cls.static2 + sess_id + cls.static3 + server_name_ext + cls.static4 + key_share + cls.static5 + padding_ext
+        
+        # اصلاح طول کل در هدر TLS و Handshake
+        total_len = len(base_packet) - 5
+        handshake_len = total_len - 4
+        
+        base_packet = bytearray(base_packet)
+        base_packet[3:5] = struct.pack("!H", total_len)
+        base_packet[6:9] = handshake_len.to_bytes(3, byteorder='big')
+        
+        return bytes(base_packet)
 
     @classmethod
     def parse_client_hello(cls, client_hello_bytes: bytes):
-        assert len(client_hello_bytes) == 517
+        # بررسی طول ثابت حذف شد تا از داینامیک بودن پشتیبانی کند
         rnd = client_hello_bytes[11:43]
         sess_id = client_hello_bytes[44:76]
-        tls_sni = client_hello_bytes[127:127 + (struct.unpack("!H", client_hello_bytes[125:127])[0])].decode()
+        tls_sni_len = struct.unpack("!H", client_hello_bytes[125:127])[0]
+        tls_sni = client_hello_bytes[127:127 + tls_sni_len].decode()
         ks_ind = 262 + len(tls_sni)
         key_share = client_hello_bytes[ks_ind:ks_ind + 32]
-        assert cls.get_client_hello_with(rnd, sess_id, tls_sni, key_share) == client_hello_bytes
         return rnd, sess_id, tls_sni, key_share
 
     @classmethod
