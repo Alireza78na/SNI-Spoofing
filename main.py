@@ -67,6 +67,24 @@ async def relay_main_loop(sock_1: socket.socket, sock_2: socket.socket, peer_tas
         traceback.print_exc()
         sys.exit("relay main loop error!")
 
+async def cleanup_stale_connections():
+    import time
+    while True:
+        await asyncio.sleep(60)
+        current_time = time.time()
+        stale_keys = []
+        for conn_id, conn in fake_injective_connections.items():
+            if current_time - conn.created_at > 30:
+                stale_keys.append(conn_id)
+        
+        for key in stale_keys:
+            try:
+                conn = fake_injective_connections[key]
+                conn.monitor = False
+                del fake_injective_connections[key]
+            except KeyError:
+                pass
+
 
 async def handle(incoming_sock: socket.socket, incoming_remote_addr):
     try:
