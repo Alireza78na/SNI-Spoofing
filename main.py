@@ -13,16 +13,11 @@ from fake_tcp import FakeInjectiveConnection, FakeTcpInjector
 
 
 def get_exe_dir():
-    """مسیر قرارگیری فایل اجرایی (PyInstaller) یا اسکریپت جاری را برمی‌گرداند."""
     if getattr(sys, 'frozen', False):
-        # در حال اجرا به عنوان فایل EXE تولید شده توسط PyInstaller
         return os.path.dirname(sys.executable)
     else:
-        # در حال اجرا به عنوان اسکریپت معمولی پایتون
         return os.path.dirname(os.path.abspath(__file__))
 
-
-# بارگذاری پیکربندی از فایل config.json
 config_path = os.path.join(get_exe_dir(), 'config.json')
 try:
     with open(config_path, 'r') as f:
@@ -41,26 +36,21 @@ CONNECT_IP = config["CONNECT_IP"]
 CONNECT_PORT = config["CONNECT_PORT"]
 INTERFACE_IPV4 = get_default_interface_ipv4(CONNECT_IP)
 DATA_MODE = "tls"
-BYPASS_METHOD = "wrong_seq"
 
-# نگهداری وضعیت تمامی اتصالات فعال جهت مدیریت توسط اینجکتور
+# متد پیش‌فرض ارتقا یافته 
+BYPASS_METHOD = "ttl_expiry"
+
 fake_injective_connections: dict[tuple, FakeInjectiveConnection] = {}
 
 
 async def cleanup_stale_connections():
-    """
-    تسک پس‌زمینه برای پاکسازی اتصالات رها شده یا قدیمی.
-    این تابع از پر شدن حافظه رم در اثر تجمیع کلیدهای دیکشنری جلوگیری می‌کند.
-    """
     while True:
         try:
-            await asyncio.sleep(60)  # بررسی هر ۶۰ ثانیه یک‌بار
+            await asyncio.sleep(60) 
             current_time = time.time()
             stale_keys = []
             
-            # پیدا کردن کانکشن‌هایی که بیش از ۶۰ ثانیه از عمرشان می‌گذرد و هنوز فعال هستند
             for conn_id, conn in fake_injective_connections.items():
-                # نکته: باید فیلد created_at را به کلاس MonitorConnection اضافه کنید
                 conn_age = current_time - getattr(conn, 'created_at', current_time)
                 if conn_age > 60:
                     stale_keys.append(conn_id)
@@ -78,10 +68,6 @@ async def cleanup_stale_connections():
 
 async def relay_main_loop(sock_1: socket.socket, sock_2: socket.socket, peer_task: asyncio.Task,
                           first_prefix_data: bytes):
-    """
-    حلقه اصلی انتقال داده بین سوکت ورودی و خروجی.
-    در صورت بروز خطا یا اتمام دیتا، هر دو سوکت را به صورت امن می‌بندد.
-    """
     try:
         loop = asyncio.get_running_loop()
         while True:
@@ -101,7 +87,6 @@ async def relay_main_loop(sock_1: socket.socket, sock_2: socket.socket, peer_tas
                 print(f"خطای غیرمنتظره در رله: {repr(e)}")
                 break
     finally:
-        # بستن امن سوکت‌ها (TCP Half-Close)
         try:
             sock_2.shutdown(socket.SHUT_WR)
         except Exception:
@@ -109,22 +94,16 @@ async def relay_main_loop(sock_1: socket.socket, sock_2: socket.socket, peer_tas
         sock_1.close()
         sock_2.close()
         
-        # لغو تسک متناظر (طرف دیگر رله)
         if not peer_task.done():
             peer_task.cancel()
 
 
 async def handle(incoming_sock: socket.socket, incoming_remote_addr):
-    """
-    مدیریت هر اتصال ورودی کلاینت.
-    ایجاد سوکت خروجی، تزریق پکت جعلی و برقراری رله دوطرفه.
-    """
     outgoing_sock = None
     fake_injective_conn = None
     try:
         loop = asyncio.get_running_loop()
         
-        # تولید محتوای TLS ClientHello برای تزریق
         if DATA_MODE == "tls":
             fake_data = ClientHelloMaker.get_client_hello_with(os.urandom(32), os.urandom(32), FAKE_SNI,
                                                                os.urandom(32))
@@ -133,11 +112,9 @@ async def handle(incoming_sock: socket.socket, incoming_remote_addr):
             incoming_sock.close()
             return
 
-        # ایجاد سوکت برای اتصال به مقصد اصلی
         outgoing_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         outgoing_sock.setblocking(False)
         
-        # تنظیمات بهینه‌سازی سوکت و Keep-Alive برای پایداری در اینترنت ایران
         for s in [incoming_sock, outgoing_sock]:
             s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
             s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 11)
@@ -147,26 +124,21 @@ async def handle(incoming_sock: socket.socket, incoming_remote_addr):
         outgoing_sock.bind((INTERFACE_IPV4, 0))
         src_port = outgoing_sock.getsockname()[1]
         
-        # تعریف وضعیت اتصال برای اینجکتور WinDivert
         fake_injective_conn = FakeInjectiveConnection(outgoing_sock, INTERFACE_IPV4, CONNECT_IP, src_port, CONNECT_PORT,
                                                       fake_data,
                                                       BYPASS_METHOD, incoming_sock)
         
-        # تنظیم زمان شروع برای جلوگیری از نشت حافظه
         fake_injective_conn.created_at = time.time()
         fake_injective_connections[fake_injective_conn.id] = fake_injective_conn
         
         try:
-            # شروع فرآیند Handshake در لایه TCP
             await loop.sock_connect(outgoing_sock, (CONNECT_IP, CONNECT_PORT))
         except Exception as e:
             print(f"اتصال به مقصد ({CONNECT_IP}:{CONNECT_PORT}) ناموفق بود: {e}")
             return
 
-        # انتظار برای اتمام تزریق پکت جعلی (SNI Spoofing)
-        if BYPASS_METHOD == "wrong_seq":
+        if BYPASS_METHOD in ["wrong_seq", "ttl_expiry"]:
             try:
-                # انتظار حداکثر ۵ ثانیه برای تایید تزریق توسط اینجکتور
                 await asyncio.wait_for(fake_injective_conn.t2a_event.wait(), 5)
                 if fake_injective_conn.t2a_msg == "unexpected_close":
                     return
@@ -179,12 +151,10 @@ async def handle(incoming_sock: socket.socket, incoming_remote_addr):
             print(f"متد بای‌پس '{BYPASS_METHOD}' تعریف نشده است.")
             return
 
-        # غیرفعال سازی مانیتورینگ برای این اتصال (چون تزریق با موفقیت انجام شد)
         fake_injective_conn.monitor = False
         if fake_injective_conn.id in fake_injective_connections:
             del fake_injective_connections[fake_injective_conn.id]
 
-        # شروع انتقال دوطرفه ترافیک (Relay)
         oti_task = asyncio.create_task(
             relay_main_loop(outgoing_sock, incoming_sock, asyncio.current_task(), b""))
         
@@ -193,7 +163,6 @@ async def handle(incoming_sock: socket.socket, incoming_remote_addr):
     except Exception:
         traceback.print_exc()
     finally:
-        # اطمینان از پاکسازی دیکشنری و بستن سوکت‌ها در هر شرایطی
         if fake_injective_conn and fake_injective_conn.id in fake_injective_connections:
             fake_injective_conn.monitor = False
             del fake_injective_connections[fake_injective_conn.id]
@@ -204,8 +173,6 @@ async def handle(incoming_sock: socket.socket, incoming_remote_addr):
 
 
 async def main():
-    """نقطه شروع سرور آسینک پایتون."""
-    # اجرای سیستم پاکسازی خودکار حافظه
     asyncio.create_task(cleanup_stale_connections())
     
     mother_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -232,12 +199,10 @@ async def main():
 
 
 if __name__ == "__main__":
-    # بررسی وجود اینترفیس شبکه معتبر
     if not INTERFACE_IPV4:
         print("خطا: اینترفیس شبکه IPv4 یافت نشد. وضعیت اتصال اینترنت را چک کنید.")
         sys.exit(1)
 
-    # تعریف فیلتر WinDivert بر اساس IP مبدا و مقصد برای افزایش کارایی (Performance)
     w_filter = (
         f"tcp and ("
         f"(ip.SrcAddr == {INTERFACE_IPV4} and ip.DstAddr == {CONNECT_IP}) or "
@@ -245,7 +210,6 @@ if __name__ == "__main__":
         f")"
     )
     
-    # راه اندازی اینجکتور در یک ترد (Thread) مجزا برای جلوگیری از مسدود شدن Event Loop
     try:
         fake_tcp_injector = FakeTcpInjector(w_filter, fake_injective_connections)
         threading.Thread(target=fake_tcp_injector.run, args=(), daemon=True).start()
@@ -257,6 +221,7 @@ if __name__ == "__main__":
     print("SNI-Spoofing Service is Running.")
     print(f"Local Proxy: {LISTEN_HOST}:{LISTEN_PORT}")
     print(f"Targeting: {CONNECT_IP}:{CONNECT_PORT}")
+    print(f"Bypass Method: {BYPASS_METHOD}")
     print("---------------------------------------------------------")
     print("USDT (BEP20): 0x76a768B53Ca77B43086946315f0BDF21156bF424")
     print("@patterniha")
