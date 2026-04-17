@@ -1,5 +1,6 @@
 import socket
 import threading
+import time
 
 
 class MonitorConnection:
@@ -15,3 +16,4 @@ class MonitorConnection:
         self.id = (self.src_ip, self.src_port, self.dst_ip, self.dst_port)
         self.thread_lock = threading.Lock()
         self.sock = sock
+        self.created_at = time.time()
